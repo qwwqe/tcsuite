@@ -9,6 +9,10 @@ import (
 	"github.com/qwwqe/tcsuite/fetcher"
 )
 
+type Repository interface {
+	SaveContent(c *fetcher.FetchedContent)
+}
+
 type repository struct {
 	db *sql.DB
 }
