@@ -1,0 +1,6 @@
+package fetcher
+
+type Fetcher interface {
+	Fetch(n int, state interface{})
+	FetchByURI(uri string)
+}
