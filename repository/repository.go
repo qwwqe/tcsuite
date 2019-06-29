@@ -2,7 +2,9 @@ package repository
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
+	"net/url"
 	"sync"
 
 	_ "github.com/lib/pq"
@@ -48,6 +50,14 @@ func initDatabase(db *sql.DB) {
 	db.Exec("CREATE TABLE IF NOT EXISTS content_tags (name VARCHAR UNIQUE NOT NULL)")
 	db.Exec("CREATE TABLE IF NOT EXISTS content_to_sources (contentId INTEGER REFERENCES original_content(id), source VARCHAR REFERENCES sources(name), unique(contentId, source))")
 	db.Exec("CREATE TABLE IF NOT EXISTS content_to_tags (contentId INTEGER REFERENCES original_content(id), tag VARCHAR REFERENCES content_tags(name), unique(contentId, tag))")
+
+	db.Exec("DROP TABLE IF EXISTS request_history")
+	db.Exec("CREATE TABLE IF NOT EXISTS request_history (requestId INTEGER)")
+	db.Exec("CREATE UNIQUE INDEX requestId_idx ON request_history(requestId)")
+
+	db.Exec("DROP TABLE IF EXISTS cookie_history")
+	db.Exec("CREATE TABLE IF NOT EXISTS cookie_history (host VARCHAR, cookies VARCHAR)")
+	db.Exec("CREATE UNIQUE INDEX host_idx ON cookie_history(host)")
 }
 
 func (r *repository) SaveContent(c *fetcher.FetchedContent) {
@@ -86,4 +96,46 @@ func (r *repository) SaveContent(c *fetcher.FetchedContent) {
 		log.Fatal(err)
 	}
 
+}
+
+// Below is this repository's implementation of colly's Storage interface
+
+func (r repository) Init() error {
+	return nil
+}
+
+func (r repository) Visited(requestId uint64) error {
+	_, err := r.db.Exec("INSERT INTO request_history (requestId) VALUES ($1) ON CONFLICT DO NOTHING", requestId)
+	return err
+}
+
+func (r repository) IsVisited(requestId uint64) (bool, error) {
+	var id uint64
+	err := r.db.QueryRow("SELECT requestId FROM request_history WHERE requestId = $1", requestId).Scan(&id)
+	if err == sql.ErrNoRows {
+		return false, nil
+	} else if err != nil {
+		fmt.Printf("Repository error: %v\n", err)
+		return false, err
+	}
+
+	return true, nil
+}
+
+func (r repository) Cookies(u *url.URL) string {
+	var cookies string
+	err := r.db.QueryRow("SELECT cookie FROM cookie_history WHERE host = $1", u.Hostname()).Scan(&cookies)
+	if err != nil {
+		fmt.Printf("Repository error: %v\n", err)
+		return ""
+	}
+
+	return cookies
+}
+
+func (r repository) SetCookies(u *url.URL, cookies string) {
+	_, err := r.db.Exec("INSERT INTO cookie_history (host, cookies) VALUES ($1, $2) ON CONFLICT DO NOTHING", u.Hostname(), cookies)
+	if err != nil {
+		fmt.Printf("Repository error: %v\n", err)
+	}
 }
