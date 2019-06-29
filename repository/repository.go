@@ -13,6 +13,12 @@ import (
 
 type Repository interface {
 	SaveContent(c *fetcher.FetchedContent)
+
+	Init() error
+	Visited(requestID uint64) error
+	IsVisited(requestID uint64) (bool, error)
+	Cookies(u *url.URL) string
+	SetCookies(u *url.URL, cookies string)
 }
 
 type repository struct {
@@ -100,16 +106,16 @@ func (r *repository) SaveContent(c *fetcher.FetchedContent) {
 
 // Below is this repository's implementation of colly's Storage interface
 
-func (r repository) Init() error {
+func (r *repository) Init() error {
 	return nil
 }
 
-func (r repository) Visited(requestId uint64) error {
+func (r *repository) Visited(requestId uint64) error {
 	_, err := r.db.Exec("INSERT INTO request_history (requestId) VALUES ($1) ON CONFLICT DO NOTHING", requestId)
 	return err
 }
 
-func (r repository) IsVisited(requestId uint64) (bool, error) {
+func (r *repository) IsVisited(requestId uint64) (bool, error) {
 	var id uint64
 	err := r.db.QueryRow("SELECT requestId FROM request_history WHERE requestId = $1", requestId).Scan(&id)
 	if err == sql.ErrNoRows {
@@ -122,7 +128,7 @@ func (r repository) IsVisited(requestId uint64) (bool, error) {
 	return true, nil
 }
 
-func (r repository) Cookies(u *url.URL) string {
+func (r *repository) Cookies(u *url.URL) string {
 	var cookies string
 	err := r.db.QueryRow("SELECT cookie FROM cookie_history WHERE host = $1", u.Hostname()).Scan(&cookies)
 	if err != nil {
@@ -133,7 +139,7 @@ func (r repository) Cookies(u *url.URL) string {
 	return cookies
 }
 
-func (r repository) SetCookies(u *url.URL, cookies string) {
+func (r *repository) SetCookies(u *url.URL, cookies string) {
 	_, err := r.db.Exec("INSERT INTO cookie_history (host, cookies) VALUES ($1, $2) ON CONFLICT DO NOTHING", u.Hostname(), cookies)
 	if err != nil {
 		fmt.Printf("Repository error: %v\n", err)
