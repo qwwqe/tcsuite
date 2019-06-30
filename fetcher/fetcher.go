@@ -1,22 +1,36 @@
 package fetcher
 
+import (
+	"github.com/qwwqe/tcsuite/repository"
+	"time"
+)
+
 type Fetcher interface {
-	Fetch(n int, state interface{}) ([]FetchedContent, error)
-	FetchByUri(uri string) (FetchedContent, error)
-	Name() string
+	Fetch(options FetchOptions) error
+	SetFetcherOptions(options FetcherOptions)
+	GetFetcherOptions() FetcherOptions
 }
 
 var Fetchers = []Fetcher{
 	LibertyFetcher{},
 }
 
-type FetchedContent struct {
-	Title     string
-	Date      string
-	Author    string
-	Abstract  string
-	Body      string
-	Tags      []string
-	CanonName string
-	Uri       string
+type FetchOptions struct {
+	ArticleLimit int
+	BeforeTime   time.Time
+	AfterTime    time.Time
+	State        interface{}
+
+	DeparturePoint string // starting url
+
+	MaxDepth    int
+	Async       bool
+	Parallelism int
+
+	Uri string // setting this disables the above options
+}
+
+type FetcherOptions struct {
+	Repository repository.Repository
+	//CanonName  string
 }

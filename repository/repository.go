@@ -5,14 +5,16 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"strconv"
 	"sync"
 
 	_ "github.com/lib/pq"
-	"github.com/qwwqe/tcsuite/fetcher"
+	"github.com/qwwqe/tcsuite/content"
 )
 
 type Repository interface {
-	SaveContent(c *fetcher.FetchedContent)
+	SaveContent(c *content.FetchedContent)
+	//GetLastVisited() string
 
 	Init() error
 	Visited(requestID uint64) error
@@ -21,8 +23,15 @@ type Repository interface {
 	SetCookies(u *url.URL, cookies string)
 }
 
+type RepositoryOptions struct {
+	RestoreRequestHistory bool
+	EnableCookies         bool
+}
+
 type repository struct {
-	db *sql.DB
+	db      *sql.DB
+	Options RepositoryOptions
+	//Storage colly.Storage
 }
 
 var repo *repository
@@ -31,7 +40,7 @@ var once sync.Once
 var dbuser = "rosie"
 var dbname = "tcsuite"
 
-func GetRepository() *repository {
+func GetRepository(options RepositoryOptions) *repository {
 	once.Do(func() {
 		repo = &repository{}
 		var err error
@@ -44,29 +53,38 @@ func GetRepository() *repository {
 			log.Fatal(err)
 		}
 
-		initDatabase(repo.db)
+		repo.db.SetMaxOpenConns(50)
+		repo.db.SetMaxIdleConns(0)
+
+		initDatabase(repo.db, options.RestoreRequestHistory)
+
+		repo.Options.RestoreRequestHistory = options.RestoreRequestHistory
 	})
 
 	return repo
 }
 
-func initDatabase(db *sql.DB) {
+func initDatabase(db *sql.DB, restoreRequestHistory bool) {
 	db.Exec("CREATE TABLE IF NOT EXISTS original_content (id SERIAL PRIMARY KEY, title VARCHAR NOT NULL, date TIMESTAMP, author VARCHAR, abstract VARCHAR, body TEXT NOT NULL, uri VARCHAR UNIQUE NOT NULL)")
 	db.Exec("CREATE TABLE IF NOT EXISTS sources (name VARCHAR UNIQUE NOT NULL, uri VARCHAR)")
 	db.Exec("CREATE TABLE IF NOT EXISTS content_tags (name VARCHAR UNIQUE NOT NULL)")
 	db.Exec("CREATE TABLE IF NOT EXISTS content_to_sources (contentId INTEGER REFERENCES original_content(id), source VARCHAR REFERENCES sources(name), unique(contentId, source))")
 	db.Exec("CREATE TABLE IF NOT EXISTS content_to_tags (contentId INTEGER REFERENCES original_content(id), tag VARCHAR REFERENCES content_tags(name), unique(contentId, tag))")
 
-	db.Exec("DROP TABLE IF EXISTS request_history")
-	db.Exec("CREATE TABLE IF NOT EXISTS request_history (requestId INTEGER)")
-	db.Exec("CREATE UNIQUE INDEX requestId_idx ON request_history(requestId)")
+	if !restoreRequestHistory {
+		db.Exec("DROP TABLE IF EXISTS request_history")
+	}
+	db.Exec("CREATE TABLE IF NOT EXISTS request_history (requestId VARCHAR)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS requestId_idx ON request_history(requestId)")
 
-	db.Exec("DROP TABLE IF EXISTS cookie_history")
+	if !restoreRequestHistory {
+		db.Exec("DROP TABLE IF EXISTS cookie_history")
+	}
 	db.Exec("CREATE TABLE IF NOT EXISTS cookie_history (host VARCHAR, cookies VARCHAR)")
-	db.Exec("CREATE UNIQUE INDEX host_idx ON cookie_history(host)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS host_idx ON cookie_history(host)")
 }
 
-func (r *repository) SaveContent(c *fetcher.FetchedContent) {
+func (r *repository) SaveContent(c *content.FetchedContent) {
 	// TODO: deal with conflicts (...ON CONFLICT DO NOTHING)
 	// TODO: use a transaction
 	var lastContentId int
@@ -111,13 +129,17 @@ func (r *repository) Init() error {
 }
 
 func (r *repository) Visited(requestId uint64) error {
-	_, err := r.db.Exec("INSERT INTO request_history (requestId) VALUES ($1) ON CONFLICT DO NOTHING", requestId)
+	// Go's sql package doesn't support insertion of uint64s...
+	requestIdString := strconv.FormatUint(requestId, 10)
+	_, err := r.db.Exec("INSERT INTO request_history (requestId) VALUES ($1) ON CONFLICT DO NOTHING", requestIdString)
 	return err
 }
 
 func (r *repository) IsVisited(requestId uint64) (bool, error) {
-	var id uint64
-	err := r.db.QueryRow("SELECT requestId FROM request_history WHERE requestId = $1", requestId).Scan(&id)
+	requestIdString := strconv.FormatUint(requestId, 10)
+	var destRequest string
+
+	err := r.db.QueryRow("SELECT requestId FROM request_history WHERE requestId = $1", requestIdString).Scan(&destRequest)
 	if err == sql.ErrNoRows {
 		return false, nil
 	} else if err != nil {
@@ -129,8 +151,12 @@ func (r *repository) IsVisited(requestId uint64) (bool, error) {
 }
 
 func (r *repository) Cookies(u *url.URL) string {
+	if !r.Options.EnableCookies {
+		return ""
+	}
+
 	var cookies string
-	err := r.db.QueryRow("SELECT cookie FROM cookie_history WHERE host = $1", u.Hostname()).Scan(&cookies)
+	err := r.db.QueryRow("SELECT cookies FROM cookie_history WHERE host = $1", u.Hostname()).Scan(&cookies)
 	if err != nil {
 		fmt.Printf("Repository error: %v\n", err)
 		return ""
@@ -140,6 +166,10 @@ func (r *repository) Cookies(u *url.URL) string {
 }
 
 func (r *repository) SetCookies(u *url.URL, cookies string) {
+	if !r.Options.EnableCookies {
+		return
+	}
+
 	_, err := r.db.Exec("INSERT INTO cookie_history (host, cookies) VALUES ($1, $2) ON CONFLICT DO NOTHING", u.Hostname(), cookies)
 	if err != nil {
 		fmt.Printf("Repository error: %v\n", err)
