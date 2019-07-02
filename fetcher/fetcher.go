@@ -7,12 +7,12 @@ import (
 
 type Fetcher interface {
 	Fetch(options FetchOptions) error
-	SetFetcherOptions(options FetcherOptions)
-	GetFetcherOptions() FetcherOptions
+	SetFetcherOptions(options *FetcherOptions)
+	GetFetcherOptions() *FetcherOptions
 }
 
 var Fetchers = []Fetcher{
-	LibertyFetcher{},
+	&LibertyFetcher{}, &WhoGovernsTwFetcher{},
 }
 
 type FetchOptions struct {

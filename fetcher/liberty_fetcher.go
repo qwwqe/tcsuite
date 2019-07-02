@@ -10,12 +10,13 @@ import (
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
-	"github.com/gocolly/colly"
+	//"github.com/gocolly/colly"
+	"github.com/qwwqe/colly"
 	"github.com/qwwqe/tcsuite/content"
 )
 
 type LibertyFetcher struct {
-	FetcherOptions FetcherOptions
+	FetcherOptions *FetcherOptions
 }
 
 var domains = map[string]string{
@@ -40,6 +41,11 @@ var disallowedUrls = []*regexp.Regexp{
 	regexp.MustCompile("/m/"),
 }
 
+var disallowedCacheUrls = []*regexp.Regexp{
+	regexp.MustCompile("ltn.com.tw/?$"),
+	regexp.MustCompile("/list/"),
+}
+
 var universalTags = []string{
 	"新聞",
 	"報紙",
@@ -56,17 +62,15 @@ func fetchLogf(format string, a ...interface{}) (n int, err error) {
 	return fmt.Printf("[LIBERTY FETCHER] "+format, a...)
 }
 
-func (f LibertyFetcher) SetFetcherOptions(fetcherOptions FetcherOptions) {
-	fetchLogf("%v\n", fetcherOptions.Repository)
-	f.FetcherOptions.Repository = fetcherOptions.Repository
+func (f *LibertyFetcher) SetFetcherOptions(fetcherOptions *FetcherOptions) {
+	f.FetcherOptions = fetcherOptions
 }
 
-func (f LibertyFetcher) GetFetcherOptions() FetcherOptions {
-	fetchLogf("GETFETCHER: %v\n", f)
+func (f *LibertyFetcher) GetFetcherOptions() *FetcherOptions {
 	return f.FetcherOptions
 }
 
-func (f LibertyFetcher) Fetch(fetchOptions FetchOptions) error {
+func (f *LibertyFetcher) Fetch(fetchOptions FetchOptions) error {
 	successful = 0
 
 	repo := f.GetFetcherOptions().Repository
@@ -80,6 +84,7 @@ func (f LibertyFetcher) Fetch(fetchOptions FetchOptions) error {
 		colly.AllowedDomains(allowedDomains...),
 		colly.DisallowedURLFilters(disallowedUrls...),
 		colly.CacheDir(cacheDir),
+		colly.DisallowedCacheURLFilters(disallowedCacheUrls...),
 		colly.IgnoreRobotsTxt(),
 		colly.MaxDepth(fetchOptions.MaxDepth),
 		colly.Async(fetchOptions.Async),
@@ -168,44 +173,6 @@ func (f LibertyFetcher) Fetch(fetchOptions FetchOptions) error {
 			e.Request.Visit(origUrl.String())
 		})
 	})
-
-	/*
-		c.OnHTML("a[href]", func(e *colly.HTMLElement) {
-			////// this is a hack
-			isArticle, _ := regexp.MatchString(`/\d+$`, e.Request.URL.String())
-			if isArticle {
-				doc, err := goquery.NewDocumentFromReader(bytes.NewReader(e.Response.Body))
-				if err != nil {
-					fetchLogf("ERROR PROCESSING RESPONSE BODY: %v\n", err)
-					return
-				}
-				articleDate := getArticleDate(doc)
-				if !articleDate.IsZero() {
-					if !fetchOptions.BeforeTime.IsZero() && !articleDate.Before(fetchOptions.BeforeTime) {
-						fetchLogf("FAILED!!!!")
-						return
-					}
-
-					if !fetchOptions.AfterTime.IsZero() && !articleDate.After(fetchOptions.AfterTime) {
-						fetchLogf("FAILED!!!!")
-						return
-					}
-				}
-			}
-			//////
-
-			// colly's Visit() method does not support unspecified ('//' - http or https) notation,
-			// so add the schema before calling Visit()
-			link := e.Attr("href")
-			origUrl, err := url.Parse(link)
-			if err != nil {
-				fetchLogf("ERROR: %v (%s)\n", err, link)
-				return
-			}
-			origUrl.Scheme = "https"
-			c.Visit(e.Request.AbsoluteURL(origUrl.String()))
-		})
-	*/
 
 	c.OnError(func(r *colly.Response, err error) {
 		fetchLogf("ERROR: %v\n", err)
