@@ -9,19 +9,24 @@ import (
 	"sync"
 
 	_ "github.com/lib/pq"
+	"github.com/qwwqe/colly/storage"
 	"github.com/qwwqe/tcsuite/content"
+	"github.com/qwwqw/tcsuite/lexica"
 )
 
 type Repository interface {
 	SaveContent(c *content.FetchedContent)
-	//GetLastVisited() string
-
-	Init() error
-	Visited(requestID uint64) error
-	IsVisited(requestID uint64) (bool, error)
-	Cookies(u *url.URL) string
-	SetCookies(u *url.URL, cookies string)
+	CollyStorage
+	/*
+		Init() error
+		Visited(requestID uint64) error
+		IsVisited(requestID uint64) (bool, error)
+		Cookies(u *url.URL) string
+		SetCookies(u *url.URL, cookies string)
+	*/
 }
+
+type CollyStorage storage.Storage
 
 type RepositoryOptions struct {
 	RestoreRequestHistory bool
