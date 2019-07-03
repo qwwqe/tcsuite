@@ -40,7 +40,7 @@ var once sync.Once
 var dbuser = "rosie"
 var dbname = "tcsuite"
 
-func GetRepository(options RepositoryOptions) *repository {
+func GetRepository(options RepositoryOptions) Repository {
 	once.Do(func() {
 		repo = &repository{}
 		var err error
