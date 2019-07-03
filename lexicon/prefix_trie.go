@@ -1,11 +1,19 @@
 package lexicon
 
 import (
-	"io"
+//"io"
 )
 
-type PrefixTrie struct {
-	root pftNode
+//type PrefixTrie *prefixTrie
+
+type PrefixTrie interface {
+	AddLexeme(string, int)
+	AddLexemes([]string, []int)
+	GetFrequency(string) (int, bool, bool)
+}
+
+type prefixTrie struct {
+	root *pftNode
 }
 
 type pftNode struct {
@@ -14,11 +22,20 @@ type pftNode struct {
 	children  map[rune]*pftNode
 }
 
-func (t *PrefixTrie) AddLexeme(lexeme string, frequency int) {
+func NewPrefixTrie() PrefixTrie {
+	return &prefixTrie{
+		root: &pftNode{
+			frequency: -1,
+			children:  map[rune]*pftNode{},
+		},
+	}
+}
+
+func (t *prefixTrie) AddLexeme(lexeme string, frequency int) {
 	t.addLexeme(lexeme, frequency)
 }
 
-func (t *PrefixTrie) AddLexemes(lexemes []string, frequencies []int) {
+func (t *prefixTrie) AddLexemes(lexemes []string, frequencies []int) {
 	for i, lexeme := range lexemes {
 		if i < len(frequencies) {
 			t.addLexeme(lexeme, frequencies[i])
@@ -28,15 +45,15 @@ func (t *PrefixTrie) AddLexemes(lexemes []string, frequencies []int) {
 	}
 }
 
-func (t *PrefixTrie) GetFrequency(lexeme string) (frequency int, isPrefix bool, exists bool) {
-	if len(lexeme) == 0 {
-		return -1, false, false
-	}
+func (t *prefixTrie) GetFrequency(lexeme string) (frequency int, isPrefix bool, exists bool) {
+	// if len(lexeme) == 0 {
+	// 	return -1, false, false
+	//}
 
-	curNode := &t.root
+	curNode := t.root
 
 	for _, r := range lexeme {
-		nextNode, ok := curNode[r]
+		nextNode, ok := curNode.children[r]
 		if !ok {
 			return -1, false, false
 		}
@@ -47,23 +64,24 @@ func (t *PrefixTrie) GetFrequency(lexeme string) (frequency int, isPrefix bool, 
 	return curNode.frequency, len(curNode.children) > 0, curNode.frequency >= 0
 }
 
-func (t *PrefixTrie) addLexeme(lexeme string, frequency int) {
-	curNode := &t.root
+func (t *prefixTrie) addLexeme(lexeme string, frequency int) {
+	curNode := t.root
 
 	for _, r := range lexeme {
-		nextNode, ok := curNode[r]
+		nextNode, ok := curNode.children[r]
 		if !ok {
 			nextNode = &pftNode{
 				//				value:     r,
 				frequency: -1,
+				children:  map[rune]*pftNode{},
 			}
-			curNode[r] = nextNode
+			curNode.children[r] = nextNode
 		}
 
 		curNode = nextNode
 	}
 
-	if curNode != &t.root {
+	if curNode != t.root {
 		curNode.frequency = frequency
 	}
 
