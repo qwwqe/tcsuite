@@ -9,4 +9,5 @@ type FetchedContent struct {
 	Tags      []string
 	CanonName string
 	Uri       string
+	Language  string
 }

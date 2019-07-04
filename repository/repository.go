@@ -11,7 +11,7 @@ import (
 	_ "github.com/lib/pq"
 	"github.com/qwwqe/colly/storage"
 	"github.com/qwwqe/tcsuite/content"
-	"github.com/qwwqw/tcsuite/lexica"
+	//"github.com/qwwqe/tcsuite/lexicon"
 )
 
 type Repository interface {
@@ -70,11 +70,13 @@ func GetRepository(options RepositoryOptions) Repository {
 }
 
 func initDatabase(db *sql.DB, restoreRequestHistory bool) {
-	db.Exec("CREATE TABLE IF NOT EXISTS original_content (id SERIAL PRIMARY KEY, title VARCHAR NOT NULL, date TIMESTAMP, author VARCHAR, abstract VARCHAR, body TEXT NOT NULL, uri VARCHAR UNIQUE NOT NULL)")
+	db.Exec("CREATE TABLE IF NOT EXISTS original_content (id SERIAL PRIMARY KEY, title VARCHAR NOT NULL, date TIMESTAMP, author VARCHAR, abstract VARCHAR, body TEXT NOT NULL, uri VARCHAR UNIQUE NOT NULL, language INTEGER REFERENCES languages(id))")
+	//db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS language_idx ON original_content(language)")
 	db.Exec("CREATE TABLE IF NOT EXISTS sources (name VARCHAR UNIQUE NOT NULL, uri VARCHAR)")
 	db.Exec("CREATE TABLE IF NOT EXISTS content_tags (name VARCHAR UNIQUE NOT NULL)")
 	db.Exec("CREATE TABLE IF NOT EXISTS content_to_sources (contentId INTEGER REFERENCES original_content(id), source VARCHAR REFERENCES sources(name), unique(contentId, source))")
 	db.Exec("CREATE TABLE IF NOT EXISTS content_to_tags (contentId INTEGER REFERENCES original_content(id), tag VARCHAR REFERENCES content_tags(name), unique(contentId, tag))")
+	db.Exec("CREATE TABLE IF NOT EXISTS languages (id SERIAL PRIMARY KEY, name VARCHAR UNIQUE NOT NULL)")
 
 	if !restoreRequestHistory {
 		db.Exec("DROP TABLE IF EXISTS request_history")
@@ -92,14 +94,32 @@ func initDatabase(db *sql.DB, restoreRequestHistory bool) {
 func (r *repository) SaveContent(c *content.FetchedContent) {
 	// TODO: deal with conflicts (...ON CONFLICT DO NOTHING)
 	// TODO: use a transaction
+
+	// Add language and retrieve id
+	var languageId int
+	if c.Language == "" {
+		log.Fatal("No language present on FetchedContent")
+	}
+	err := r.db.QueryRow("SELECT id FROM languages WHERE name = $1", c.Language).Scan(&languageId)
+	if err == sql.ErrNoRows {
+		fmt.Printf("FAILED TO GRAB LANGUAGE FROM TABLE (MUST BE FIRST OCCURRENCE?). Language: %s\n", c.Language)
+		err = r.db.QueryRow("INSERT INTO languages (name) VALUES ($1) ON CONFLICT DO NOTHING RETURNING id", c.Language).Scan(&languageId)
+		if err != nil {
+			fmt.Println("AOSIDJAOSIDJOASIDJ")
+			log.Fatal(err)
+		}
+	} else if err != nil {
+		log.Fatal("Repository error: %v\n", err)
+	}
+
+	// Insert content
 	var lastContentId int
-	err := r.db.QueryRow("INSERT INTO original_content (title, date, author, abstract, body, uri) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING RETURNING id",
-		c.Title, c.Date, c.Author, c.Abstract, c.Body, c.Uri).Scan(&lastContentId)
+	err = r.db.QueryRow("INSERT INTO original_content (title, date, author, abstract, body, uri, language) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING RETURNING id",
+		c.Title, c.Date, c.Author, c.Abstract, c.Body, c.Uri, languageId).Scan(&lastContentId)
 	if err != nil {
 		if err == sql.ErrNoRows { // content saved already
 			return
 		}
-
 		log.Fatal(err)
 	}
 

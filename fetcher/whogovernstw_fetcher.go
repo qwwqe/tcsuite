@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"golang.org/x/text/language"
 	"net/url"
 	"strings"
 	"time"
@@ -29,10 +30,9 @@ var wgtUniversalTags = []string{
 
 var wgtDefaultDeparturePoint = "https://whogovernstw.org/"
 var wgtCanonName = "菜市場政治學"
-
 var wgtCacheDir = "./cache/whogovernstw_cache"
-
 var wgtSuccessful = 0
+var wgtLanguage = language.MustParse("zh-tw").String()
 
 func wgtFetchLogf(format string, a ...interface{}) (n int, err error) {
 	return fmt.Printf("[WHOGOVERNSTW FETCHER] "+format, a...)
@@ -229,6 +229,9 @@ func wgtProcessArticle(r *colly.Response, doc *goquery.Document) (*content.Fetch
 	} else {
 		fc.Body = bodyText
 	}
+
+	// LANGUAGE
+	fc.Language = wgtLanguage
 
 	wgtFetchLogf("SUCCESS: %s\n", fc.Uri)
 	wgtSuccessful++

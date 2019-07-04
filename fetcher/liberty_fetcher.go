@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"golang.org/x/text/language"
 	"net/url"
 	"regexp"
 	"strings"
@@ -55,6 +56,7 @@ var universalTags = []string{
 var defaultDeparturePoint = "https://www.ltn.com.tw/"
 var canonName = "自由時報"
 var cacheDir = "./cache/liberty_cache"
+var ltyLanguage = language.MustParse("zh-tw").String()
 
 var successful = 0
 
@@ -388,6 +390,9 @@ func processArticle(r *colly.Response, doc *goquery.Document) (*content.FetchedC
 	} else {
 		fc.Body = bodyText
 	}
+
+	// LANGUAGE
+	fc.Language = ltyLanguage
 
 	fetchLogf("SUCCESS: %s\n", fc.Uri)
 	successful++
