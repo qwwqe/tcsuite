@@ -288,16 +288,16 @@ func (r *repository) AddLexemes(name string, language string, lexemes []string, 
 	return nil
 }
 
-func (r *repository) GetLexemes(name string, language string) ([]string, []int, error) {
+func (r *repository) GetLexemes(lexiconName string, language string) ([]string, []int, error) {
 	lexemes := make([]string, 0)
 	frequencies := make([]int, 0)
 
-	languageId, err := r.retrieveLanguageId(name)
+	languageId, err := r.retrieveLanguageId(language)
 	if err != nil {
 		return []string{}, []int{}, err
 	}
 
-	lexiconId, err := r.retrieveLexiconId(name, languageId)
+	lexiconId, err := r.retrieveLexiconId(lexiconName, languageId)
 	if err != nil {
 		return []string{}, []int{}, err
 	}
