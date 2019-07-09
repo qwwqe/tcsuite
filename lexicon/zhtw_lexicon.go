@@ -13,7 +13,7 @@ type zhTwLexicon struct {
 
 // Create a new lexicon object, returning either a handle
 // to a new lexicon or an existing one of the name provided.
-func NewLexicon(name string, language string) Lexicon {
+func NewZhTwLexicon(name string, language string) Lexicon {
 	return &zhTwLexicon{
 		name:       name,
 		language:   language,
