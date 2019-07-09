@@ -2,13 +2,14 @@ package repository
 
 import (
 	"database/sql"
+	//"errors"
 	"fmt"
 	"log"
 	"net/url"
 	"strconv"
 	"sync"
 
-	_ "github.com/lib/pq"
+	pq "github.com/lib/pq"
 	"github.com/qwwqe/colly/storage"
 	"github.com/qwwqe/tcsuite/content"
 	//"github.com/qwwqe/tcsuite/lexicon"
@@ -17,13 +18,10 @@ import (
 type Repository interface {
 	SaveContent(c *content.FetchedContent)
 	CollyStorage
-	/*
-		Init() error
-		Visited(requestID uint64) error
-		IsVisited(requestID uint64) (bool, error)
-		Cookies(u *url.URL) string
-		SetCookies(u *url.URL, cookies string)
-	*/
+
+	AddLexeme(name string, language string, lexeme string, frequency int) error
+	AddLexemes(name string, language string, lexemes []string, frequencies []int) error
+	GetLexemes(name string, language string) (lexemes []string, frequences []int, err error)
 }
 
 type CollyStorage storage.Storage
@@ -70,6 +68,7 @@ func GetRepository(options RepositoryOptions) Repository {
 }
 
 func initDatabase(db *sql.DB, restoreRequestHistory bool) {
+	// SCRAPED CONTENT
 	db.Exec("CREATE TABLE IF NOT EXISTS original_content (id SERIAL PRIMARY KEY, title VARCHAR NOT NULL, date TIMESTAMP, author VARCHAR, abstract VARCHAR, body TEXT NOT NULL, uri VARCHAR UNIQUE NOT NULL, language INTEGER REFERENCES languages(id))")
 	//db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS language_idx ON original_content(language)")
 	db.Exec("CREATE TABLE IF NOT EXISTS sources (name VARCHAR UNIQUE NOT NULL, uri VARCHAR)")
@@ -78,6 +77,7 @@ func initDatabase(db *sql.DB, restoreRequestHistory bool) {
 	db.Exec("CREATE TABLE IF NOT EXISTS content_to_tags (contentId INTEGER REFERENCES original_content(id), tag VARCHAR REFERENCES content_tags(name), unique(contentId, tag))")
 	db.Exec("CREATE TABLE IF NOT EXISTS languages (id SERIAL PRIMARY KEY, name VARCHAR UNIQUE NOT NULL)")
 
+	// COLLY BOOKKEEPING
 	if !restoreRequestHistory {
 		db.Exec("DROP TABLE IF EXISTS request_history")
 	}
@@ -89,6 +89,10 @@ func initDatabase(db *sql.DB, restoreRequestHistory bool) {
 	}
 	db.Exec("CREATE TABLE IF NOT EXISTS cookie_history (host VARCHAR, cookies VARCHAR)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS host_idx ON cookie_history(host)")
+
+	// LEXICA
+	db.Exec("CREATE TABLE IF NOT EXISTS lexica (id SERIAL PRIMARY KEY, name VARCHAR UNIQUE NOT NULL, language INTEGER REFERENCES languages(id))")
+	db.Exec("CREATE TABLE IF NOT EXISTS lexicon_words (id SERIAL PRIMARY KEY, word VARCHAR NOT NULL, frequency INTEGER NOT NULL DEFAULT 0, lexicon INTEGER REFERENCES lexica(id), unique(word, lexicon))")
 }
 
 func (r *repository) SaveContent(c *content.FetchedContent) {
@@ -96,20 +100,12 @@ func (r *repository) SaveContent(c *content.FetchedContent) {
 	// TODO: use a transaction
 
 	// Add language and retrieve id
-	var languageId int
 	if c.Language == "" {
 		log.Fatal("No language present on FetchedContent")
 	}
-	err := r.db.QueryRow("SELECT id FROM languages WHERE name = $1", c.Language).Scan(&languageId)
-	if err == sql.ErrNoRows {
-		fmt.Printf("FAILED TO GRAB LANGUAGE FROM TABLE (MUST BE FIRST OCCURRENCE?). Language: %s\n", c.Language)
-		err = r.db.QueryRow("INSERT INTO languages (name) VALUES ($1) ON CONFLICT DO NOTHING RETURNING id", c.Language).Scan(&languageId)
-		if err != nil {
-			fmt.Println("AOSIDJAOSIDJOASIDJ")
-			log.Fatal(err)
-		}
-	} else if err != nil {
-		log.Fatal("Repository error: %v\n", err)
+	languageId, err := r.addOrRetrieveLanguageId(c.Language)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	// Insert content
@@ -199,4 +195,187 @@ func (r *repository) SetCookies(u *url.URL, cookies string) {
 	if err != nil {
 		fmt.Printf("Repository error: %v\n", err)
 	}
+}
+
+// LEXICON
+
+// AddLexeme adds an individual lexeme the the lexeme repository.
+// Duplicate lexemes will be ignored.
+func (r *repository) AddLexeme(name string, language string, lexeme string, frequency int) error {
+	languageId, err := r.addOrRetrieveLanguageId(language)
+	if err != nil {
+		return err
+	}
+
+	lexiconId, err := r.addOrRetrieveLexiconId(name, languageId)
+	if err != nil {
+		return err
+	}
+
+	_, err = r.db.Exec("INSERT INTO lexicon_words (word, frequency, lexicon) ($1, $2, $3) ON CONFLICT DO NOTHING", lexeme, frequency, lexiconId)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// AddLexemes adds lexemes by bulk to the lexeme repository.
+// Due to limitations of pq.CopyIn() and unlike the AddLexeme() method, this will fail on duplicate entries.
+func (r *repository) AddLexemes(name string, language string, lexemes []string, frequencies []int) error {
+	languageId, err := r.addOrRetrieveLanguageId(language)
+	if err != nil {
+		return err
+	}
+
+	lexiconId, err := r.addOrRetrieveLexiconId(name, languageId)
+	if err != nil {
+		return err
+	}
+
+	// stmt, err := r.db.Prepare("INSERT INTO lexicon_words (word, lexicon) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+	// if err != nil {
+	// 	return err
+	// }
+
+	// // TODO: BLANK LEXEMES????
+	// for i, lexeme := range lexemes {
+	// 	if i >= len(frequencies) {
+	// 		break
+	// 	}
+	// 	_, err = stmt.Exec(lexeme, lexiconId)
+	// 	if err != nil {
+	// 		return err
+	// 	}
+	// }
+
+	txn, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+
+	stmt, err := txn.Prepare(pq.CopyIn("lexicon_words", "word", "frequency", "lexicon"))
+	if err != nil {
+		return err
+	}
+
+	for i, lexeme := range lexemes {
+		if i >= len(frequencies) {
+			break
+		}
+		_, err = stmt.Exec(lexeme, frequencies[i], lexiconId)
+		if err != nil {
+			fmt.Printf("AddLexeme error on: %s, %d (%d)\n", lexeme, frequencies[i], lexiconId)
+			return err
+		}
+	}
+
+	_, err = stmt.Exec()
+	if err != nil {
+		return err
+	}
+
+	err = stmt.Close()
+	if err != nil {
+		return err
+	}
+
+	err = txn.Commit()
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (r *repository) GetLexemes(name string, language string) ([]string, []int, error) {
+	lexemes := make([]string, 0)
+	frequencies := make([]int, 0)
+
+	languageId, err := r.retrieveLanguageId(name)
+	if err != nil {
+		return []string{}, []int{}, err
+	}
+
+	lexiconId, err := r.retrieveLexiconId(name, languageId)
+	if err != nil {
+		return []string{}, []int{}, err
+	}
+
+	rows, err := r.db.Query("SELECT word, frequency FROM lexicon_words WHERE lexicon = $1", lexiconId)
+	if err != nil {
+		return []string{}, []int{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var lexeme string
+		var frequency int
+		if err := rows.Scan(&lexeme, &frequency); err != nil {
+			return []string{}, []int{}, err
+		}
+
+		lexemes = append(lexemes, lexeme)
+		frequencies = append(frequencies, frequency)
+	}
+	err = rows.Err()
+	if err != nil {
+		return []string{}, []int{}, err
+	}
+
+	return lexemes, frequencies, nil
+}
+
+// HELPERS
+
+func (r *repository) retrieveLanguageId(name string) (int, error) {
+	var languageId int
+	err := r.db.QueryRow("SELECT id FROM LANGUAGES WHERE name = $1", name).Scan(&languageId)
+	if err != nil {
+		return -1, err
+	}
+
+	return languageId, nil
+}
+
+func (r *repository) addOrRetrieveLanguageId(name string) (int, error) {
+	var languageId int
+	err := r.db.QueryRow("SELECT id FROM languages WHERE name = $1", name).Scan(&languageId)
+	if err == sql.ErrNoRows {
+		fmt.Printf("FAILED TO GRAB LANGUAGE FROM TABLE (MUST BE FIRST OCCURRENCE?). Language: %s\n", name)
+		err = r.db.QueryRow("INSERT INTO languages (name) VALUES ($1) ON CONFLICT DO NOTHING RETURNING id", name).Scan(&languageId)
+		if err != nil {
+			return -1, err
+		}
+	} else if err != nil {
+		return -1, err
+	}
+
+	return languageId, nil
+}
+
+func (r *repository) retrieveLexiconId(name string, languageId int) (int, error) {
+	var lexiconId int
+	err := r.db.QueryRow("SELECT id FROM lexica WHERE name = $1 and language = $2", name, languageId).Scan(&lexiconId)
+	if err != nil {
+		return -1, err
+	}
+
+	return lexiconId, nil
+}
+
+func (r *repository) addOrRetrieveLexiconId(name string, languageId int) (int, error) {
+	var lexiconId int
+	err := r.db.QueryRow("SELECT id FROM lexica WHERE name = $1 and language = $2", name, languageId).Scan(&lexiconId)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			err = r.db.QueryRow("INSERT INTO lexica (name, language) VALUES ($1, $2) RETURNING id", name, languageId).Scan(&lexiconId)
+			if err != nil {
+				return -1, err
+			}
+		} else {
+			return -1, err
+		}
+	}
+
+	return lexiconId, err
 }
