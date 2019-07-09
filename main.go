@@ -93,7 +93,7 @@ func main() {
 
 		lexiconName := "Traditional Chinese Comprehensive"
 		lexiconLang := language.MustParse("zh-tw").String()
-		lexicon := l.NewLexicon(lexiconName, lexiconLang)
+		lexicon := l.NewZhTwLexicon(lexiconName, lexiconLang)
 
 		err := lexicon.LoadRepository(repo)
 		if err != nil {
