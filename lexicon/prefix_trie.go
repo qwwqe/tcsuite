@@ -10,10 +10,12 @@ type PrefixTrie interface {
 	AddLexeme(string, int)
 	AddLexemes([]string, []int)
 	GetFrequency(string) (int, bool, bool)
+	NumEntries() int
 }
 
 type prefixTrie struct {
-	root *pftNode
+	root    *pftNode
+	entries int
 }
 
 type pftNode struct {
@@ -64,6 +66,10 @@ func (t *prefixTrie) GetFrequency(lexeme string) (frequency int, isPrefix bool, 
 	return curNode.frequency, len(curNode.children) > 0, curNode.frequency >= 0
 }
 
+func (t *prefixTrie) NumEntries() int {
+	return t.entries
+}
+
 func (t *prefixTrie) addLexeme(lexeme string, frequency int) {
 	curNode := t.root
 
@@ -82,36 +88,10 @@ func (t *prefixTrie) addLexeme(lexeme string, frequency int) {
 	}
 
 	if curNode != t.root {
+		if curNode.frequency == -1 {
+			t.entries++
+		}
 		curNode.frequency = frequency
 	}
 
-	/*
-		reader := strings.NewReader(lexeme)
-
-		for {
-			r, _, err := reader.ReadRune()
-			if err != nil {
-				if err == io.EOF {
-					if curNode != &t.root {
-						curNode.frequency = frequency
-					}
-				} else {
-					fmt.Println("Prefix trie: %v\n", err)
-				}
-
-				break
-			}
-
-			nextNode, ok := curNode[r]
-			if !ok {
-				nextNode = &pftNode{
-					value:     r,
-					frequency: -1,
-				}
-				curNode[r] = nextNode
-			}
-
-			curNode = nextNode
-		}
-	*/
 }
