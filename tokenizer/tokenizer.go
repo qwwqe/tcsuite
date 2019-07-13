@@ -1,7 +1,15 @@
 package tokenizer
 
-import ()
+import (
+	"github.com/qwwqe/tcsuite/entities/corpus"
+	l "github.com/qwwqe/tcsuite/lexicon"
+	//	"io"
+)
 
-type Tokenizer interface {
-	Tokenize() []string
+type Interface interface {
+	Tokenize(string, l.Lexicon) ([]*corpus.Word, error)
+}
+
+type Options struct {
+	MaxDepth int
 }
