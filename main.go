@@ -3,16 +3,19 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"golang.org/x/text/language"
+	//"golang.org/x/text/language"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	//"github.com/qwwqe/tcsuite/content"
+	"github.com/qwwqe/tcsuite/entities/languages"
 	f "github.com/qwwqe/tcsuite/fetcher"
 	l "github.com/qwwqe/tcsuite/lexicon"
 	r "github.com/qwwqe/tcsuite/repository"
+	t "github.com/qwwqe/tcsuite/tokenizer"
+	"github.com/qwwqe/tcsuite/tokenizer/zhtw"
 )
 
 type FetchOptionSet struct {
@@ -51,7 +54,7 @@ var fetchOptionSets = []FetchOptionSet{
 	},
 }
 
-var usage = "Usage: tcsuite <fetch | poplex> <lexicon file>\n"
+var usage = "Usage: tcsuite <fetch | poplex | tokenize> < | lexicon file | content_id>\n"
 
 func main() {
 	if len(os.Args) == 1 {
@@ -92,7 +95,7 @@ func main() {
 		}
 
 		lexiconName := "Traditional Chinese Comprehensive"
-		lexiconLang := language.MustParse("zh-tw").String()
+		lexiconLang := languages.ZH_TW //language.MustParse("zh-tw").String()
 		lexicon := l.NewZhTwLexicon(lexiconName, lexiconLang)
 
 		err := lexicon.LoadRepository(repo)
@@ -138,6 +141,48 @@ func main() {
 		}
 
 		fmt.Printf("Lexicon \"%s\" has %d entries.\n", lexiconName, lexicon.NumEntries())
+	case "tokenize":
+		if len(os.Args) < 3 {
+			fmt.Println(usage)
+			os.Exit(1)
+		}
+
+		lexiconName := "Traditional Chinese Comprehensive"
+		lexiconLang := languages.ZH_TW //language.MustParse("zh-tw").String()
+		lexicon := l.NewZhTwLexicon(lexiconName, lexiconLang)
+
+		err := lexicon.LoadRepository(repo)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+
+		id, err := strconv.Atoi(os.Args[2])
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+
+		fetchedContent, err := repo.GetFetchedContent(id)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+
+		tokenizer := zhtw.NewTokenizer(&t.Options{
+			MaxDepth: 3,
+		})
+
+		tokens, err := tokenizer.Tokenize(fetchedContent.Body, lexicon)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+
+		for _, token := range tokens {
+			fmt.Println(token.Word)
+		}
+
 	default:
 		fmt.Printf(usage)
 		os.Exit(1)

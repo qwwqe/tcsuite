@@ -12,10 +12,12 @@ import (
 	pq "github.com/lib/pq"
 	"github.com/qwwqe/colly/storage"
 	"github.com/qwwqe/tcsuite/content"
+	//"github.com/qwwqe/tcsuite/entities/corpus"
 	//"github.com/qwwqe/tcsuite/lexicon"
 )
 
 type Repository interface {
+	GetFetchedContent(id int) (*content.FetchedContent, error)
 	SaveContent(c *content.FetchedContent)
 	CollyStorage
 
@@ -141,6 +143,17 @@ func (r *repository) SaveContent(c *content.FetchedContent) {
 		log.Fatal(err)
 	}
 
+}
+
+func (r *repository) GetFetchedContent(id int) (*content.FetchedContent, error) {
+	var c content.FetchedContent
+	err := r.db.QueryRow("SELECT title, date, author, abstract, body FROM original_content WHERE id = $1", id).Scan(
+		&c.Title, &c.Date, &c.Author, &c.Abstract, &c.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	return &c, nil
 }
 
 // Below is this repository's implementation of colly's Storage interface
