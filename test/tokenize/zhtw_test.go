@@ -51,3 +51,37 @@ func TestTokenize(t *testing.T) {
 		}
 	}
 }
+
+func BenchmarkTokenizer(b *testing.B) {
+	repo := r.GetRepository(r.RepositoryOptions{
+		RestoreRequestHistory: false,
+	})
+
+	lexiconName := "Traditional Chinese Comprehensive"
+	lexiconLang := languages.ZH_TW
+
+	lexicon := l.NewZhTwLexicon(lexiconName, lexiconLang)
+	err := lexicon.LoadRepository(repo)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	tok := zhtw.NewTokenizer(&tokenizer.Options{
+		MaxDepth: 3,
+	})
+
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		fetchedContent, err := repo.GetFetchedContent(53040)
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		_, err = tok.Tokenize(fetchedContent.Body, lexicon)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+
+}
