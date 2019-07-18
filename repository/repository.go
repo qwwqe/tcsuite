@@ -12,18 +12,22 @@ import (
 	pq "github.com/lib/pq"
 	"github.com/qwwqe/colly/storage"
 	"github.com/qwwqe/tcsuite/content"
-	//"github.com/qwwqe/tcsuite/entities/corpus"
+	"github.com/qwwqe/tcsuite/entities/corpus"
 	//"github.com/qwwqe/tcsuite/lexicon"
 )
 
 type Repository interface {
 	GetFetchedContent(id int) (*content.FetchedContent, error)
+	GetFetchedContentByTag(tag string) ([]*content.FetchedContent, error)
 	SaveContent(c *content.FetchedContent)
-	CollyStorage
+
+	RegisterTokens(contentId int, tokens []*corpus.Word) error
 
 	AddLexeme(name string, language string, lexeme string, frequency int) error
 	AddLexemes(name string, language string, lexemes []string, frequencies []int) error
 	GetLexemes(name string, language string) (lexemes []string, frequences []int, err error)
+
+	CollyStorage
 }
 
 type CollyStorage storage.Storage
@@ -70,14 +74,23 @@ func GetRepository(options RepositoryOptions) Repository {
 }
 
 func initDatabase(db *sql.DB, restoreRequestHistory bool) {
-	// SCRAPED CONTENT
-	db.Exec("CREATE TABLE IF NOT EXISTS original_content (id SERIAL PRIMARY KEY, title VARCHAR NOT NULL, date TIMESTAMP, author VARCHAR, abstract VARCHAR, body TEXT NOT NULL, uri VARCHAR UNIQUE NOT NULL, language INTEGER REFERENCES languages(id))")
+	// CONTENT
+	db.Exec("CREATE TABLE IF NOT EXISTS original_content (id SERIAL PRIMARY KEY, title VARCHAR NOT NULL, date TIMESTAMP, author VARCHAR, abstract VARCHAR, body TEXT NOT NULL, uri VARCHAR UNIQUE NOT NULL, language INTEGER REFERENCES languages(id), tokenized BOOLEAN DEFAULT FALSE)")
 	//db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS language_idx ON original_content(language)")
 	db.Exec("CREATE TABLE IF NOT EXISTS sources (name VARCHAR UNIQUE NOT NULL, uri VARCHAR)")
 	db.Exec("CREATE TABLE IF NOT EXISTS content_tags (name VARCHAR UNIQUE NOT NULL)")
 	db.Exec("CREATE TABLE IF NOT EXISTS content_to_sources (contentId INTEGER REFERENCES original_content(id), source VARCHAR REFERENCES sources(name), unique(contentId, source))")
 	db.Exec("CREATE TABLE IF NOT EXISTS content_to_tags (contentId INTEGER REFERENCES original_content(id), tag VARCHAR REFERENCES content_tags(name), unique(contentId, tag))")
 	db.Exec("CREATE TABLE IF NOT EXISTS languages (id SERIAL PRIMARY KEY, name VARCHAR UNIQUE NOT NULL)")
+
+	// WORDS
+	db.Exec("CREATE TABLE IF NOT EXISTS words (id SERIAL PRIMARY KEY, word VARCHAR NOT NULL, lexical BOOLEAN DEFAULT TRUE, language INTEGER REFERENCES languages(id))")
+	db.Exec("CREATE TABLE IF NOT EXISTS tokenized_content (id SERIAL PRIMARY KEY, position INTEGER NOT NULL, word INTEGER REFERENCES words(id), content INTEGER REFERENCES original_content(id))")
+	db.Exec("CREATE INDEX IF NOT EXISTS token_content_idx ON tokenized_content(content)")
+
+	// LEXICA
+	db.Exec("CREATE TABLE IF NOT EXISTS lexica (id SERIAL PRIMARY KEY, name VARCHAR UNIQUE NOT NULL, language INTEGER REFERENCES languages(id))")
+	db.Exec("CREATE TABLE IF NOT EXISTS lexicon_words (id SERIAL PRIMARY KEY, word VARCHAR NOT NULL, frequency INTEGER NOT NULL DEFAULT 0, lexicon INTEGER REFERENCES lexica(id), unique(word, lexicon))")
 
 	// COLLY BOOKKEEPING
 	if !restoreRequestHistory {
@@ -91,10 +104,6 @@ func initDatabase(db *sql.DB, restoreRequestHistory bool) {
 	}
 	db.Exec("CREATE TABLE IF NOT EXISTS cookie_history (host VARCHAR, cookies VARCHAR)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS host_idx ON cookie_history(host)")
-
-	// LEXICA
-	db.Exec("CREATE TABLE IF NOT EXISTS lexica (id SERIAL PRIMARY KEY, name VARCHAR UNIQUE NOT NULL, language INTEGER REFERENCES languages(id))")
-	db.Exec("CREATE TABLE IF NOT EXISTS lexicon_words (id SERIAL PRIMARY KEY, word VARCHAR NOT NULL, frequency INTEGER NOT NULL DEFAULT 0, lexicon INTEGER REFERENCES lexica(id), unique(word, lexicon))")
 }
 
 func (r *repository) SaveContent(c *content.FetchedContent) {
@@ -147,13 +156,110 @@ func (r *repository) SaveContent(c *content.FetchedContent) {
 
 func (r *repository) GetFetchedContent(id int) (*content.FetchedContent, error) {
 	var c content.FetchedContent
-	err := r.db.QueryRow("SELECT title, date, author, abstract, body FROM original_content WHERE id = $1", id).Scan(
-		&c.Title, &c.Date, &c.Author, &c.Abstract, &c.Body)
+	err := r.db.QueryRow("SELECT id, title, date, author, abstract, body FROM original_content WHERE id = $1", id).Scan(
+		&c.Id, &c.Title, &c.Date, &c.Author, &c.Abstract, &c.Body)
 	if err != nil {
 		return nil, err
 	}
 
 	return &c, nil
+}
+
+func (r *repository) GetFetchedContentByTag(tag string) ([]*content.FetchedContent, error) {
+	contents := []*content.FetchedContent{}
+	rows, err := r.db.Query("SELECT id, title, date, author, abstract, body FROM original_content WHERE id in (SELECT contentid FROM content_to_tags WHERE tag = $1)", tag)
+	if err != nil {
+		return []*content.FetchedContent{}, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var c content.FetchedContent
+		if err := rows.Scan(&c.Id, &c.Title, &c.Date, &c.Author, &c.Abstract, &c.Body); err != nil {
+			return []*content.FetchedContent{}, err
+		}
+		contents = append(contents, &c)
+	}
+
+	if err = rows.Err(); err != nil {
+		return []*content.FetchedContent{}, err
+	}
+
+	return contents, nil
+}
+
+func (r *repository) RegisterTokens(contentId int, tokens []*corpus.Word) error {
+	var languageId int
+	var tokenized bool
+	err := r.db.QueryRow("SELECT language, tokenized FROM original_content WHERE id = $1", contentId).Scan(&languageId, &tokenized)
+	if err != nil {
+		return err
+	}
+
+	// Halt if content is already tokenized
+	if tokenized {
+		return nil
+	}
+
+	// Retrieve/add word ids corresponding to the tokens
+	// TODO: address this bottleneck
+	wordIds := []int{}
+	for _, token := range tokens {
+		wordId, err := r.addOrRetrieveWordId(token.Word, token.Lexical, languageId)
+		if err != nil {
+			return err
+		}
+
+		wordIds = append(wordIds, wordId)
+	}
+
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+
+	//stmt, err := tx.Prepare("INSERT INTO tokenized_content (position, word, content) VALUES ($1, $2, $3)")
+	stmt, err := tx.Prepare(pq.CopyIn("tokenized_content", "position", "word", "content"))
+	if err != nil {
+		return err
+	}
+
+	// Compile tokenized corpus
+	for i, _ := range tokens {
+		_, err = stmt.Exec(i, wordIds[i], contentId)
+		if err != nil {
+			if rollbackErr := tx.Rollback(); rollbackErr != nil {
+				return rollbackErr
+			}
+			return err
+		}
+	}
+
+	_, err = stmt.Exec()
+	if err != nil {
+		return err
+	}
+
+	err = stmt.Close()
+	if err != nil {
+		return err
+	}
+
+	// Update content tokenized status
+	_, err = tx.Exec("UPDATE original_content SET tokenized = TRUE WHERE id = $1", contentId)
+	if err != nil {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil {
+			return rollbackErr
+		}
+		return err
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // Below is this repository's implementation of colly's Storage interface
@@ -391,4 +497,21 @@ func (r *repository) addOrRetrieveLexiconId(name string, languageId int) (int, e
 	}
 
 	return lexiconId, err
+}
+
+func (r *repository) addOrRetrieveWordId(word string, lexical bool, languageId int) (int, error) {
+	var wordId int
+	err := r.db.QueryRow("SELECT id FROM words WHERE word = $1 and language = $2", word, languageId).Scan(&wordId)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			err = r.db.QueryRow("INSERT INTO words (word, lexical, language) VALUES ($1, $2, $3) RETURNING id", word, lexical, languageId).Scan(&wordId)
+			if err != nil {
+				return -1, err
+			}
+		} else {
+			return -1, err
+		}
+	}
+
+	return wordId, nil
 }

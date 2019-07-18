@@ -1,6 +1,7 @@
 package content
 
 type FetchedContent struct {
+	Id        int
 	Title     string
 	Date      string
 	Author    string
