@@ -5,6 +5,8 @@ import (
 	"time"
 )
 
+const CacheDir = "./cache/"
+
 type Fetcher interface {
 	Fetch(options FetchOptions) error
 	SetFetcherOptions(options *FetcherOptions)

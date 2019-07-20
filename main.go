@@ -15,6 +15,7 @@ import (
 	//"github.com/qwwqe/tcsuite/content"
 	"github.com/qwwqe/tcsuite/entities/languages"
 	f "github.com/qwwqe/tcsuite/fetcher"
+	"github.com/qwwqe/tcsuite/fetcher/womany"
 	l "github.com/qwwqe/tcsuite/lexicon"
 	r "github.com/qwwqe/tcsuite/repository"
 	t "github.com/qwwqe/tcsuite/tokenizer"
@@ -50,6 +51,20 @@ var fetchOptionSets = []FetchOptionSet{
 			Parallelism: 4,
 		},
 		UpdateSet: f.FetchOptions{
+			MaxDepth:    3,
+			Async:       true,
+			Parallelism: 4,
+		},
+	},
+	FetchOptionSet{
+		Fetcher: &womany.Fetcher{},
+		InitialSet: f.FetchOptions{
+			MaxDepth:    100,
+			Async:       true,
+			Parallelism: 4,
+		},
+		UpdateSet: f.FetchOptions{
+			AfterTime:   time.Now().Add(-1 * 36 * time.Hour),
 			MaxDepth:    3,
 			Async:       true,
 			Parallelism: 4,
@@ -92,8 +107,18 @@ func main() {
 
 		mode := "update"
 
-		for _, fOpts := range fetchOptionSets {
+		for i, fOpts := range fetchOptionSets {
 			var fetchOpts f.FetchOptions
+
+			// TESTING
+			mode = "update"
+			if i == 2 {
+				mode = "initial"
+			} else {
+				continue
+			}
+			// END TESTING
+
 			switch mode {
 			case "update":
 				fetchOpts = fOpts.UpdateSet
@@ -203,6 +228,44 @@ func main() {
 
 		for _, token := range tokens {
 			fmt.Println(token.Word)
+		}
+
+	case "tokenize_all":
+		lexiconName := "Traditional Chinese Comprehensive"
+		lexiconLang := languages.ZH_TW //language.MustParse("zh-tw").String()
+		lexicon := l.NewZhTwLexicon(lexiconName, lexiconLang)
+
+		err := lexicon.LoadRepository(repo)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+
+		fetchedContents, err := repo.GetUntokenizedContent()
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("Retrieved %d untokenized articles.\n", len(fetchedContents))
+
+		tokenizer := zhtw.NewTokenizer(&t.Options{
+			MaxDepth: 3,
+		})
+
+		for i, fetchedContent := range fetchedContents {
+			tokens, err := tokenizer.Tokenize(fetchedContent.Body, lexicon)
+			if err != nil {
+				fmt.Println(err)
+				os.Exit(1)
+			}
+
+			err = repo.RegisterTokens(fetchedContent.Id, tokens)
+			if err != nil {
+				fmt.Println(err)
+				os.Exit(1)
+			}
+			fmt.Printf("%d/%d\n", i+1, len(fetchedContents))
 		}
 
 	case "tokenize_by_tag":
