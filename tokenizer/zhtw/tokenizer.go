@@ -45,22 +45,37 @@ func (t *zhtwTokenizer) Tokenize(text string, l lexicon.Lexicon) ([]*corpus.Word
 			depth:      0,
 			textOffset: textOffset,
 		}
-		leadingSegments, failureOffset := findAllFollowingSegments(text, rootSegment, l)
+		leadingSegments, _ := findAllFollowingSegments(text, rootSegment, l)
 
-		// If no leading segments exist, there must be a leading string of non-lexical characters,
-		// so clump these together into a single segment and jump ahead
+		// If no leading segments exist, there must be at least one leading non-lexical character,
+		// so chop off the first character and continue
 		if len(leadingSegments) == 0 {
-			if failureOffset == textOffset { // This should not happen
+			_, width := utf8.DecodeRuneInString(text[textOffset:])
+			if width == 0 { // this should not happen
 				break
 			}
 
 			nonLexLeader := &corpus.Word{
-				Word:    text[textOffset:failureOffset],
+				Word:    text[textOffset : textOffset+width],
 				Lexical: false,
 			}
 			words = append(words, nonLexLeader)
-			textOffset = failureOffset
+			textOffset += width
 			continue
+
+			/*
+				if failureOffset == textOffset { // This should not happen
+					break
+				}
+
+				nonLexLeader := &corpus.Word{
+					Word:    text[textOffset:failureOffset],
+					Lexical: false,
+				}
+				words = append(words, nonLexLeader)
+				textOffset = failureOffset
+				continue
+			*/
 		}
 
 		// Select candidates based on longest total length

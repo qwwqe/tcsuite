@@ -20,6 +20,7 @@ import (
 type Repository interface {
 	GetFetchedContent(id int) (*content.FetchedContent, error)
 	GetFetchedContentByTag(tag string) ([]*content.FetchedContent, error)
+	GetUntokenizedContent() ([]*content.FetchedContent, error)
 	SaveContent(c *content.FetchedContent)
 
 	RegisterTokens(contentId int, tokens []*corpus.Word) error
@@ -41,6 +42,7 @@ type RepositoryOptions struct {
 type repository struct {
 	db      *sql.DB
 	Options RepositoryOptions
+	wordIds map[string]int
 	//Storage colly.Storage
 }
 
@@ -52,7 +54,9 @@ var dbname = "tcsuite"
 
 func GetRepository(options RepositoryOptions) Repository {
 	once.Do(func() {
-		repo = &repository{}
+		repo = &repository{
+			wordIds: map[string]int{},
+		}
 		var err error
 		repo.db, err = sql.Open("postgres", "user=rosie dbname=tcsuite sslmode=disable")
 		if err != nil {
@@ -88,6 +92,13 @@ func initDatabase(db *sql.DB, restoreRequestHistory bool) {
 	db.Exec("CREATE TABLE IF NOT EXISTS words (id SERIAL PRIMARY KEY, word VARCHAR NOT NULL, lexical BOOLEAN DEFAULT TRUE, language INTEGER REFERENCES languages(id), constraint unique_word_lang_pair unique (word, language))")
 	db.Exec("CREATE TABLE IF NOT EXISTS tokenized_content (id SERIAL PRIMARY KEY, position INTEGER NOT NULL, word INTEGER REFERENCES words(id), content INTEGER REFERENCES original_content(id))")
 	db.Exec("CREATE INDEX IF NOT EXISTS token_content_idx ON tokenized_content(content)")
+
+	db.Exec("CREATE MATERIALZIED VIEW IF NOT EXISTS token_strings " +
+		"SELECT tokenized_content.content, tokenized_content.id AS token_id, tokenized_content.position, words.id AS word_id, words.word, words.lexical " +
+		"FROM tokenized_content LEFT JOIN words ON tokenized_content.word = words.id")
+	db.Exec("CREATE INDEX IF NOT EXISTS ON token_strings (content)")
+	db.Exec("CREATE INDEX IF NOT EXISTS ON token_strings (position)")
+	db.Exec("CREATE INDEX IF NOT EXISTS ON token_strings (word_id)")
 
 	// LEXICA
 	db.Exec("CREATE TABLE IF NOT EXISTS lexica (id SERIAL PRIMARY KEY, name VARCHAR UNIQUE NOT NULL, language INTEGER REFERENCES languages(id))")
@@ -189,6 +200,30 @@ func (r *repository) GetFetchedContentByTag(tag string) ([]*content.FetchedConte
 	return contents, nil
 }
 
+func (r *repository) GetUntokenizedContent() ([]*content.FetchedContent, error) {
+	contents := make([]*content.FetchedContent, 0, 10000)
+	//contents := []*content.FetchedContent{}
+	rows, err := r.db.Query("SELECT id, title, date, author, abstract, body FROM original_content WHERE tokenized = false")
+	if err != nil {
+		return []*content.FetchedContent{}, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var c content.FetchedContent
+		if err := rows.Scan(&c.Id, &c.Title, &c.Date, &c.Author, &c.Abstract, &c.Body); err != nil {
+			return []*content.FetchedContent{}, err
+		}
+		contents = append(contents, &c)
+	}
+
+	if err = rows.Err(); err != nil {
+		return []*content.FetchedContent{}, err
+	}
+
+	return contents, nil
+}
+
 func (r *repository) RegisterTokens(contentId int, tokens []*corpus.Word) error {
 	var languageId int
 	var tokenized bool
@@ -235,6 +270,7 @@ func (r *repository) RegisterTokens(contentId int, tokens []*corpus.Word) error 
 	// Compile tokenized corpus
 	for i, token := range tokens {
 		//_, err = stmt.Exec(i, wordIds[i], contentId)
+		//fmt.Printf("%s %d %d\n", token.Word, wordToId[token.Word], contentId)
 		_, err = stmt.Exec(i, wordToId[token.Word], contentId)
 		if err != nil {
 			if rollbackErr := tx.Rollback(); rollbackErr != nil {
@@ -525,23 +561,53 @@ func (r *repository) addOrRetrieveWordId(word string, lexical bool, languageId i
 	return wordId, nil
 }
 
+func (r *repository) testDoodler() error {
+	foo := []interface{}{"condo", true, 3, "digbsy", false, 3}
+	rows, err := r.db.Query("INSERT INTO words (word, lexical, language) VALUES ($1, $2, $3), ($4, $5, $6) ON CONFLICT ON CONSTRAINT unique_word_lang_pair DO UPDATE SET language = words.language RETURNING word, id", foo...)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var word string
+		var id int
+		if err := rows.Scan(&word, &id); err != nil {
+			return err
+		}
+		fmt.Printf("%s %d\n", word, id)
+	}
+	err = rows.Err()
+	if err != nil {
+		return err
+	}
+
+	return nil
+
+}
+
 func (r *repository) addOrRetrieveWordIds(words []*corpus.Word, languageId int) (map[string]int, error) {
-	wordMap := map[string]int{}
+	// TODO: whitespace isn't being inserted properly
+	wordSeen := map[string]bool{}
 
 	// this is so retarded
 	valueStrings := make([]string, 0, len(words))
 	wordArgs := make([]interface{}, 0, len(words))
 	offset := 0
 	for i, word := range words {
-		if _, ok := wordMap[word.Word]; ok {
+		_, seen := wordSeen[word.Word]
+		if _, ok := r.wordIds[word.Word]; ok || seen {
 			offset++
 			continue
 		}
-		wordMap[word.Word] = 0
+
+		wordSeen[word.Word] = true
 
 		// DANGER DANGER AMIRITE?
 		valueStrings = append(valueStrings, fmt.Sprintf("($%d, %t, %d)", i+1-offset, word.Lexical, languageId))
 		wordArgs = append(wordArgs, word.Word)
+	}
+
+	if len(valueStrings) == 0 {
+		return r.wordIds, nil
 	}
 
 	stmtString := fmt.Sprintf("INSERT INTO words (word, lexical, language) VALUES %s ON CONFLICT ON CONSTRAINT unique_word_lang_pair DO UPDATE SET language = words.language RETURNING word, id",
@@ -557,14 +623,15 @@ func (r *repository) addOrRetrieveWordIds(words []*corpus.Word, languageId int) 
 		if err := rows.Scan(&word, &id); err != nil {
 			return map[string]int{}, err
 		}
-		wordMap[word] = id
+		//wordMap[word] = id
+		r.wordIds[word] = id
 	}
 	err = rows.Err()
 	if err != nil {
 		return map[string]int{}, err
 	}
 
-	return wordMap, nil
+	return r.wordIds, nil
 
 	/*
 		entryRows := make([]interface{}, 0, len(words))
