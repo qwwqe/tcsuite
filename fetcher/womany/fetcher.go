@@ -2,10 +2,12 @@ package womany
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,22 +23,48 @@ type Fetcher struct {
 	FetcherOptions *fetcher.FetcherOptions
 }
 
+type articleList struct {
+	TotalCount  int               `json:"total_count"`
+	TotalPages  int               `json:"total_pages"`
+	CurrentPage int               `json:"current_page"`
+	Articles    []articleListItem `json:"articles"`
+}
+
+type articleListItem struct {
+	Id       int                 `json:"id"`
+	Title    string              `json:"title"`
+	Date     string              `json:"published_at"`
+	Abstract string              `json:"description"`
+	Tags     []map[string]string `json:"tags"`
+	Author   articleListAuthor   `json:"author"`
+}
+
+type articleListAuthor struct {
+	Name string
+}
+
 var allowedDomains = []string{
+	"api.womany.net",
 	"womany.net",
 	"www.womany.net",
 }
 
 var disallowedUrls = []*regexp.Regexp{
-	regexp.MustCompile("/images/"),
-	regexp.MustCompile("womany.net/shop[^/]*$"),
-	regexp.MustCompile("womany.net/shop/"),
-	regexp.MustCompile("/print$"),
+	/*
+		regexp.MustCompile("/images/"),
+		regexp.MustCompile("womany.net/shop[^/]*$"),
+		regexp.MustCompile("womany.net/shop/"),
+		regexp.MustCompile("/print$"),
+	*/
 }
 
 var disallowedCacheUrls = []*regexp.Regexp{
-	regexp.MustCompile("womany.net/$"),
-	regexp.MustCompile("/interests/"),
-	regexp.MustCompile("top_writers"),
+	regexp.MustCompile("api.womany.net/articles/list"),
+	/*
+		regexp.MustCompile("womany.net/$"),
+		regexp.MustCompile("/interests/"),
+		regexp.MustCompile("top_writers"),
+	*/
 }
 
 var universalTags = []string{
@@ -45,13 +73,20 @@ var universalTags = []string{
 }
 
 //var defaultDeparturePoint = "https:/womany.net/"
-var defaultDeparturePoint = "https://womany.net/"
+//var defaultDeparturePoint = "https://womany.net/"
+//var articleRegex = regexp.MustCompile("/read/article/")
+
 var canonName = "女人迷"
 var cacheDir = fetcher.CacheDir + "womany_cache"
 var language = languages.ZH_TW
-var articleRegex = regexp.MustCompile("/read/article/")
+
+var articleBaseUrl = "https://womany.net/read/article/"
+var apiUrl = "https://api.womany.net/articles/list" // ?page=1
+var defaultDeparturePoint = "https://api.womany.net/articles/list?page=1"
 
 var successful = 0
+
+var savedArticles = map[int]articleListItem{}
 
 func fetchLogf(format string, a ...interface{}) (n int, err error) {
 	return fmt.Printf("[WOMANY FETCHER] "+format, a...)
@@ -71,8 +106,8 @@ func (f *Fetcher) Fetch(fetchOptions fetcher.FetchOptions) error {
 	repo := f.GetFetcherOptions().Repository
 
 	c := colly.NewCollector(
-		colly.AllowedDomains(allowedDomains...),
-		colly.DisallowedURLFilters(disallowedUrls...),
+		//colly.AllowedDomains(allowedDomains...),
+		//colly.DisallowedURLFilters(disallowedUrls...),
 		colly.CacheDir(cacheDir),
 		colly.DisallowedCacheURLFilters(disallowedCacheUrls...),
 		colly.IgnoreRobotsTxt(),
@@ -89,88 +124,134 @@ func (f *Fetcher) Fetch(fetchOptions fetcher.FetchOptions) error {
 		return err
 	}
 
+	articleCollector := c.Clone()
+
 	c.OnRequest(func(r *colly.Request) {
-		fetchLogf("VISITING: %s\n", r.URL.String())
+		fetchLogf("GRABBING JSON: %s\n", r.URL.String())
 	})
 
 	c.OnResponse(func(r *colly.Response) {
-		url := r.Request.URL.String()
-		fetchLogf("RESPONSE: %s\n", url)
+		fetchLogf("RESPONSE (JSON): %s\n", r.Request.URL.String())
 
-		// Filter response by url
-		isArticle := articleRegex.MatchString(url)
-		if !isArticle {
+		var l articleList
+		err := json.Unmarshal(r.Body, &l)
+		if err != nil {
+			fetchLogf("Error unmarshaling JSON: %v\n", err)
 			return
 		}
 
-		// Filter response by date
+		//fmt.Println(string(r.Body))
+		fmt.Printf("Total Count: %d, Total Pages: %d, Current Page: %d\n, # Articles: %d\n", l.TotalCount, l.TotalPages, l.CurrentPage, len(l.Articles))
+
+		// collect articles in current json listing
+		for _, article := range l.Articles {
+			if _, ok := savedArticles[article.Id]; !ok {
+				// ensure satisfaction of date filters
+				pubDate, _ := time.Parse(time.RFC3339, article.Date)
+				if !fetchOptions.BeforeTime.IsZero() && !pubDate.Before(fetchOptions.BeforeTime) {
+					continue
+				}
+				if !fetchOptions.AfterTime.IsZero() && !pubDate.After(fetchOptions.AfterTime) {
+					continue
+				}
+
+				// grab article
+				savedArticles[article.Id] = article
+				u := fmt.Sprintf("%s%d", articleBaseUrl, article.Id)
+
+				articleCollector.Visit(r.Request.AbsoluteURL(u))
+				//articleCollector.Visit(u)
+			}
+		}
+
+		// get next json listing
+		if l.CurrentPage < l.TotalPages {
+			u, err := url.Parse(apiUrl)
+			if err != nil {
+				fetchLogf("Error parsing api url: %v\n", err)
+				return
+			}
+
+			q := u.Query()
+			q.Add("page", fmt.Sprintf("%d", l.CurrentPage+1))
+			u.RawQuery = q.Encode()
+
+			//r.Request.Visit(u.String())
+			c.Visit(r.Request.AbsoluteURL(u.String()))
+		}
+
+	})
+
+	articleCollector.OnResponse(func(r *colly.Response) {
+		fetchLogf("RESPONSE (ARTICLE): %s\n", r.Request.URL.String())
+		fc := &content.FetchedContent{}
+
 		doc, err := goquery.NewDocumentFromReader(bytes.NewReader(r.Body))
 		if err != nil {
 			fetchLogf("ERROR PROCESSING RESPONSE BODY: %v\n", err)
 			return
 		}
-		articleDate := getArticleDate(doc)
 
-		if !fetchOptions.BeforeTime.IsZero() && !articleDate.Before(fetchOptions.BeforeTime) {
+		fc.Uri = r.Request.URL.String()
+
+		// extract article id from url
+		trailingId := regexp.MustCompile(`/(\d+)$`)
+		groups := trailingId.FindStringSubmatch(fc.Uri)
+		if len(groups) < 2 {
+			fetchLogf("ERROR MATCHING ID IN URL: %v\n", err)
 			return
 		}
-
-		if !fetchOptions.AfterTime.IsZero() && !articleDate.After(fetchOptions.AfterTime) {
-			return
-		}
-
-		fc, err := processArticle(r, doc)
-		if err == nil {
-			repo.SaveContent(fc)
-		}
-	})
-
-	c.OnHTML("html", func(e *colly.HTMLElement) {
-		doc, err := goquery.NewDocumentFromReader(bytes.NewReader(e.Response.Body))
+		id, err := strconv.Atoi(groups[1])
 		if err != nil {
-			fetchLogf("ERROR PROCESSING RESPONSE BODY: %v\n", err)
+			fetchLogf("ERROR PARSING ID FROM URL: %v\n", err)
 			return
 		}
 
-		//isArticle, _ := regexp.MatchString(`/\d+$`, e.Request.URL.String())
-		isArticle := articleRegex.MatchString(e.Request.URL.String())
-		if isArticle {
-			articleDate := getArticleDate(doc)
-			if !articleDate.IsZero() {
-				if !fetchOptions.BeforeTime.IsZero() && !articleDate.Before(fetchOptions.BeforeTime) {
-					fetchLogf("FAILED (TOO NEW)\n")
-					return
-				}
+		// get body
+		bodyText := getArticleBody(doc)
 
-				if !fetchOptions.AfterTime.IsZero() && !articleDate.After(fetchOptions.AfterTime) {
-					fetchLogf("FAILED (TOO OLD)\n")
-					return
+		if bodyText == "" {
+			fetchLogf("FAILED (BODY): %s\n", fc.Uri)
+			return
+		} else {
+			fc.Body = bodyText
+		}
+
+		articleListing := savedArticles[id]
+		fc.Title = articleListing.Title
+
+		dateFormat := "2006-01-02 15:04:05"
+		date, _ := time.Parse(time.RFC3339, articleListing.Date)
+		fc.Date = date.Format(dateFormat)
+
+		fc.Author = articleListing.Author.Name
+		fc.Abstract = articleListing.Abstract
+
+		// process tags
+		fc.Tags = make([]string, 0, len(articleListing.Tags)+len(universalTags))
+		tagMap := map[string]bool{}
+		for _, tag := range universalTags {
+			if !tagMap[tag] {
+				tagMap[tag] = true
+				fc.Tags = append(fc.Tags, tag)
+			}
+		}
+		for _, articleTagMap := range articleListing.Tags {
+			for _, tag := range articleTagMap {
+				if !tagMap[tag] {
+					tagMap[tag] = true
+					fc.Tags = append(fc.Tags, tag)
 				}
 			}
 		}
 
-		// colly's Visit() method does not support unspecified ('//' - http or https) notation,
-		// so add the schema before calling Visit()
-		hrefSelection := doc.Find(`a[href]`)
-		hrefSelection.Each(func(_ int, s *goquery.Selection) {
-			link, _ := s.Attr("href")
-			origUrl, err := url.Parse(link)
-			if err != nil {
-				fetchLogf("ERROR: %v (%s)\n", err, link)
-				return
-			}
-			origUrl.Scheme = "https"
-			if isArticle {
-				origUrl.RawQuery = ""
-				/*
-					q := origUrl.Query()
-					q.Del("ref")
-					origUrl.RawQuery = q.Encode()
-				*/
-			}
-			//c.Visit(e.Request.AbsoluteURL(origUrl.String()))
-			e.Request.Visit(origUrl.String())
-		})
+		fc.CanonName = canonName
+		fc.Language = language
+
+		repo.SaveContent(fc)
+
+		fetchLogf("SUCCESS: %s\n", fc.Uri)
+		successful++
 	})
 
 	c.OnError(func(r *colly.Response, err error) {
