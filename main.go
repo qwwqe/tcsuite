@@ -18,6 +18,7 @@ import (
 	"github.com/qwwqe/tcsuite/fetcher/womany"
 	l "github.com/qwwqe/tcsuite/lexicon"
 	r "github.com/qwwqe/tcsuite/repository"
+	"github.com/qwwqe/tcsuite/server"
 	t "github.com/qwwqe/tcsuite/tokenizer"
 	"github.com/qwwqe/tcsuite/tokenizer/zhtw"
 )
@@ -59,7 +60,7 @@ var fetchOptionSets = []FetchOptionSet{
 	FetchOptionSet{
 		Fetcher: &womany.Fetcher{},
 		InitialSet: f.FetchOptions{
-			MaxDepth:    100,
+			MaxDepth:    1000,
 			Async:       true,
 			Parallelism: 4,
 		},
@@ -308,6 +309,9 @@ func main() {
 				os.Exit(1)
 			}
 		}
+
+	case "serve":
+		server.Serve(repo)
 
 	default:
 		fmt.Printf(usage)
