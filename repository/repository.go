@@ -17,6 +17,8 @@ import (
 	//"github.com/qwwqe/tcsuite/lexicon"
 )
 
+type Interface Repository
+
 type Repository interface {
 	GetFetchedContent(id int) (*content.FetchedContent, error)
 	GetFetchedContentByTag(tag string) ([]*content.FetchedContent, error)
@@ -28,6 +30,13 @@ type Repository interface {
 	AddLexeme(name string, language string, lexeme string, frequency int) error
 	AddLexemes(name string, language string, lexemes []string, frequencies []int) error
 	GetLexemes(name string, language string) (lexemes []string, frequences []int, err error)
+
+	// TODO: language differentiation
+	// TODO: standardize return values
+	GetTopWordsByTag(tag string, amount int) (words []string, counts []int, err error)
+	GetTopFollowingWords(word string, amount int) (words []string, counts []int, err error)
+	GetTopPrecedingWords(word string, amount int) (words []string, counts []int, err error)
+	GetTopWordsByOccurence(word string, amount int) (words []string, counts []int, err error)
 
 	CollyStorage
 }
@@ -93,12 +102,19 @@ func initDatabase(db *sql.DB, restoreRequestHistory bool) {
 	db.Exec("CREATE TABLE IF NOT EXISTS tokenized_content (id SERIAL PRIMARY KEY, position INTEGER NOT NULL, word INTEGER REFERENCES words(id), content INTEGER REFERENCES original_content(id))")
 	db.Exec("CREATE INDEX IF NOT EXISTS token_content_idx ON tokenized_content(content)")
 
-	db.Exec("CREATE MATERIALZIED VIEW IF NOT EXISTS token_strings " +
+	db.Exec("CREATE MATERIALZIED VIEW IF NOT EXISTS token_strings AS " +
 		"SELECT tokenized_content.content, tokenized_content.id AS token_id, tokenized_content.position, words.id AS word_id, words.word, words.lexical " +
 		"FROM tokenized_content LEFT JOIN words ON tokenized_content.word = words.id")
 	db.Exec("CREATE INDEX IF NOT EXISTS ON token_strings (content)")
 	db.Exec("CREATE INDEX IF NOT EXISTS ON token_strings (position)")
 	db.Exec("CREATE INDEX IF NOT EXISTS ON token_strings (word_id)")
+	db.Exec("CREATE INDEX IF NOT EXISTS ON token_strings (content, position)")
+	db.Exec("CREATE INDEX IF NOT EXISTS ON token_strings (lexical)")
+
+	db.Exec("CREATE MATERIALIZED VIEW IF NOT EXISTS common_words AS " +
+		"SELECT token_strings.word_id, token_strings.word, count(*) AS count FROM token_strings " +
+		"WHERE token_strings.lexical = true " +
+		"GROUP BY token_strings.word_id, token_strings.word ORDER BY (count(*)) DESC LIMIT 200")
 
 	// LEXICA
 	db.Exec("CREATE TABLE IF NOT EXISTS lexica (id SERIAL PRIMARY KEY, name VARCHAR UNIQUE NOT NULL, language INTEGER REFERENCES languages(id))")
@@ -487,6 +503,130 @@ func (r *repository) GetLexemes(lexiconName string, language string) ([]string, 
 	}
 
 	return lexemes, frequencies, nil
+}
+
+func (r *repository) GetTopWordsByTag(tag string, amount int) ([]string, []int, error) {
+	words := make([]string, 0, amount)
+	counts := make([]int, 0, amount)
+	rows, err := r.db.Query(
+		"SELECT word, count(*) FROM token_strings WHERE "+
+			"content IN (SELECT contentid FROM content_to_tags WHERE tag = $1) and "+
+			"word_id NOT IN (SELECT word_id FROM common_words) and "+
+			"lexical = TRUE "+
+			"GROUP BY word ORDER BY count DESC LIMIT($2)", tag, amount)
+	if err != nil {
+		return []string{}, []int{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var word string
+		var count int
+		if err := rows.Scan(&word, &count); err != nil {
+			return []string{}, []int{}, err
+		}
+
+		words = append(words, word)
+		counts = append(counts, count)
+	}
+	err = rows.Err()
+	if err != nil {
+		return []string{}, []int{}, err
+	}
+
+	return words, counts, nil
+}
+
+func (r *repository) GetTopWordsByOccurence(word string, amount int) ([]string, []int, error) {
+	words := make([]string, 0, amount)
+	counts := make([]int, 0, amount)
+
+	rows, err := r.db.Query(
+		"with relcon as (select content from token_strings where word_id = (select coalesce(id) from words where word=$1) group by content) select word, count(*) as amount from token_strings where lexical = true and word_id not in (select word_id from common_words) and content in (select content from relcon) group by word order by amount desc limit($2)", word, amount)
+	if err != nil {
+		return []string{}, []int{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var word string
+		var count int
+		if err := rows.Scan(&word, &count); err != nil {
+			return []string{}, []int{}, err
+		}
+
+		words = append(words, word)
+		counts = append(counts, count)
+	}
+	err = rows.Err()
+	if err != nil {
+		return []string{}, []int{}, err
+	}
+
+	return words, counts, nil
+
+}
+
+func (r *repository) GetTopFollowingWords(word string, amount int) ([]string, []int, error) {
+	words := make([]string, 0, amount)
+	counts := make([]int, 0, amount)
+	rows, err := r.db.Query("select t2.word, count(*) as amount from token_strings as t1, token_strings as t2 where t1.word_id = (select coalesce(id) from words where word = $1) and t1.content = t2.content and t2.position = t1.position + 1 group by t2.word order by amount desc limit($2)",
+		//rows, err := r.db.Query("select t2.word, count(*) as amount from token_strings as t1, token_strings as t2 where t1.word_id in (select id from words where word = $1) and t1.content = t2.content and t2.position = t1.position + 1 group by t2.word, t1.word order by amount desc limit ($2)",
+		// "SELECT t2.word, count(*) FROM token_strings AS t1, token_strings AS t2 WHERE "+
+		// 	"t1.word = $1 AND t1.content = t2.content AND t2.position = t1.position + 1 "+
+		// 	"GROUP BY t2.word ORDER BY count DESC LIMIT ($2)",
+		word, amount)
+	// SELECT t2.word, count(*) FROM token_strings AS t1, token_strings AS t2 WHERE t1.word = '中國' AND t1.content = t2.content AND t2.position = t1.position + 1 GROUP BY t2.word ORDER BY count DESC LIMIT (20)
+	// select t2.word, count(*) as amount from token_strings as t1, token_strings as t2 where t1.word = '飽受' and t1.content = t2.content and t2.position = t1.position + 1 group by t2.word, t1.word order by amount desc limit (20)
+	if err != nil {
+		return []string{}, []int{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var word string
+		var count int
+		if err := rows.Scan(&word, &count); err != nil {
+			return []string{}, []int{}, err
+		}
+
+		words = append(words, word)
+		counts = append(counts, count)
+	}
+	err = rows.Err()
+	if err != nil {
+		return []string{}, []int{}, err
+	}
+
+	return words, counts, nil
+}
+
+func (r *repository) GetTopPrecedingWords(word string, amount int) ([]string, []int, error) {
+	words := make([]string, 0, amount)
+	counts := make([]int, 0, amount)
+	rows, err := r.db.Query("select t2.word, count(*) as amount from token_strings as t1, token_strings as t2 where t1.word_id = (select coalesce(id) from words where word = $1) and t1.content = t2.content and t1.position = t2.position + 1 group by t2.word order by amount desc limit($2)",
+		//rows, err := r.db.Query("select t2.word, count(*) as amount from token_strings as t1, token_strings as t2 where t1.word_id in (select id from words where word = $1) and t1.content = t2.content and t1.position = t2.position + 1 group by t2.word, t1.word order by amount desc limit ($2)",
+		// "SELECT t2.word, count(*) FROM token_strings AS t1, token_strings AS t2 WHERE "+
+		// 	"t1.word = $1 AND t1.content = t2.content AND t1.position = t2.position + 1 "+
+		// 	"GROUP BY t2.word ORDER BY count DESC LIMIT ($2)",
+		word, amount)
+	if err != nil {
+		return []string{}, []int{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var word string
+		var count int
+		if err := rows.Scan(&word, &count); err != nil {
+			return []string{}, []int{}, err
+		}
+
+		words = append(words, word)
+		counts = append(counts, count)
+	}
+	err = rows.Err()
+	if err != nil {
+		return []string{}, []int{}, err
+	}
+
+	return words, counts, nil
 }
 
 // HELPERS
